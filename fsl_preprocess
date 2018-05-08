@@ -1,0 +1,322 @@
+#!python
+
+
+### JM 3/24/2018 resample standard high res volumes into low res anisotropic images with simulated motion for ML training
+
+
+import glob
+import os
+import subprocess
+import numpy as np
+from shutil import copyfile
+import nibabel as nib
+import itertools
+from PIL import Image
+
+
+# stddir = '/home/mint/Documents/Test/CRL_Fetal_Brain_Atlas_2016'
+# btkdir = '/home/mint/fbrain-build/Utilities'
+# fsldir = ''
+#
+# resampledir = stddir + '/Resample'
+# maskdir = stddir + '/Masks'
+# cropped_stddir = stddir + '/Cropped'
+# offsetdir = stddir + '/Offset'
+# motiondir = stddir + '/Motion'
+# gatherdir = stddir + '/Slabs'
+# resizedir = stddir+ '/Resize'
+
+
+def getfiles(dir):
+    ''' get list of absolute paths for files in the dir'''
+    paths = glob.glob(dir + '/*.nii.gz')
+    return paths
+
+def resample(stddir_arg):
+    stds=getfiles(stddir_arg)
+
+    if not os.path.exists(resampledir):
+        os.makedirs(resampledir)
+
+    for path in stds:
+
+        dir, file = os.path.split(path)
+        print('Ref = ' + file)
+        cmd= btkdir + '/btkSimulateStandardViewFromIsotropicImage'
+        args=' -i ' + path  + ' --axl ' + ' --sx 1 --sy 1 --sz 4 ' + ' -o ' + resampledir + '/' + file[:-7] + '_sim.nii.gz'
+        # print (cmd + args)
+        print('Output= ' + file[:-7] + '_sim.nii.gz')
+        sts = subprocess.Popen(cmd +  args, shell=True).wait()
+
+def maskall(stddir_arg):
+    stds = getfiles(stddir_arg)
+    if not os.path.exists(stddir_arg + '/Mask'):
+        os.makedirs(stddir_arg + '/Mask')
+    for path in stds:
+        dir, file = os.path.split(path)
+        cmd = btkdir + '/btkBinarizeMask'
+        args = ' -i ' + path + ' -o ' + stddir_arg + '/Mask/' + file[:-7] + '_mask.nii.gz'
+        sts = subprocess.Popen(cmd + args, shell=True).wait()
+
+def motion_sim(resampledir_arg):
+    print('Motion Simulation')
+    resmpls = getfiles(resampledir_arg)
+
+    if not os.path.exists(motiondir):
+        os.makedirs(motiondir)
+    for path in resmpls[1:2]:
+
+        dir, file = os.path.split(path)
+        for i in range(10):
+            ref = stddir + '/' + file[:5] + '.nii.gz'
+            mask = resampledir + '/Mask/' + file[:-7] + '_mask.nii.gz'
+            print('input = ' + file)
+            cmd = btkdir + '/btkSimulateLowResolutionImage'
+            args = ' -i ' + path + ' -r ' + ref + ' -m ' + mask + ' -o ' + motiondir + '/' +file[:-7] + 'motion' + str(i) + '.nii.gz'
+            sts = subprocess.Popen(cmd + args, shell=True).wait()
+
+def crop_with_mask(stddir_arg):
+    stds = getfiles(stddir_arg)
+    print('Crop Std Using Mask')
+    if not os.path.exists(stddir_arg + '/Cropped'):
+        os.makedirs(stddir_arg + '/Cropped')
+    for path in stds:
+        dir, file = os.path.split(path)
+        cmd = btkdir + '/btkCropImageUsingMask'
+        mask = stddir_arg + '/Mask' + '/' + file[:-7] + '_mask.nii.gz'
+        args = ' -i ' + path + ' -m ' + mask + ' -o ' + stddir_arg + '/Cropped' + '/' + file[:-7] + '_cropped.nii.gz'
+        print(cmd + args)
+        sts = subprocess.Popen(cmd + args, shell=True).wait()
+
+def offsets(cropped_stddir_arg):
+    imgs = getfiles(cropped_stddir_arg)
+    print('truncate 1,2,3 pixles from top of image')
+    if not os.path.exists(offsetdir):
+        os.makedirs(offsetdir)
+
+    for path in imgs:
+        dir, file = os.path.split(path)
+        copyfile(path , offsetdir + '/' + file[:-7] + '_offset0.nii.gz' )
+        for i in range(3):
+            cmd = 'fslsplit '
+            args = path + ' ' + offsetdir + '/slice -z'
+            sts = subprocess.Popen(cmd + args, shell=True).wait()
+            if i==0:
+                os.remove(offsetdir + '/' 'slice0000.nii.gz')
+                print('z-1')
+            elif i==1:
+                os.remove(offsetdir + '/' 'slice0000.nii.gz')
+                os.remove(offsetdir + '/' 'slice0001.nii.gz')
+                print('z-2')
+            else:
+                os.remove(offsetdir + '/' 'slice0000.nii.gz')
+                os.remove(offsetdir + '/' 'slice0001.nii.gz')
+                os.remove(offsetdir + '/' 'slice0002.nii.gz')
+                print('z-3')
+            cmd = 'fslmerge -z '
+            args = offsetdir + '/' + file[:-7] + '_offset' +str(i+1) + '.nii.gz' + ' ' + offsetdir + '/' + 'slice*'
+            sts = subprocess.Popen(cmd + args, shell=True).wait()
+            for f in glob.glob(offsetdir + '/slice*'):
+                os.remove(f)
+
+def rotate(stddir_arg, theta = 15, axis= 'y'):
+    rotdir = stddir_arg + '/Rotated' + str(theta) + str(axis)
+    if not os.path.exists(rotdir):
+        os.makedirs(rotdir)
+    imgs = getfiles(stddir_arg)
+    if axis == 'y':
+        ax= '0,1,0'
+    elif axis == 'x':
+
+        ax = '1,0,0'
+    elif axis == 'z':
+        ax = '0,0,1'
+
+    for path in imgs:
+        dir, file = os.path.split(path)
+        mask = stddir_arg + '/Mask' + '/' + file[:-7] + '_mask.nii.gz'
+        # grid = nib.load(path)
+        # center = (np.asarray(grid.shape)/2)
+        sts = subprocess.Popen('makerot' + ' -a ' + ax + ' --theta=' + str(theta) + ' --cov=' +  path + ' -o ' + rotdir + '/rotation.dec'  , shell=True).wait()
+        fh = open(rotdir + '/rotation.dec', 'r')
+        x = []
+        for line in fh.readlines():
+            y = [float.fromhex(value) for value in line.split()]
+            x.append(y)
+
+        np.savetxt( rotdir + '/rotation.mat', x, delimiter='  ', fmt='%f')
+
+        cmd = 'flirt '
+
+        args =  ' -in ' + path + ' -ref ' + mask + ' -applyxfm -init ' + rotdir + '/rotation.mat' + ' -out ' + rotdir + '/' + file[:-7] + '_rotate' + str(theta) + axis + '.nii.gz'
+        print(cmd + args)
+        sts = subprocess.Popen(cmd + args, shell=True).wait()
+
+def slab(rotated_arg):
+    slabdir = rotated_arg + '/Slab'
+    cropdir = rotated_arg + '/Cropped'
+    if not os.path.exists(slabdir):
+        os.makedirs(slabdir)
+    imgs = getfiles(cropdir)
+    for path in imgs:
+        dir, file = os.path.split(path)
+        img = nib.load(path)
+        print(img.shape)
+
+        slab = [img.shape[2] * 2 // 5, img.shape[2] * 3 // 4]
+        data = img.get_data()
+
+        slab_img = nib.Nifti1Pair(data[:, :, slab[0]: slab[1]], np.eye(4))
+
+        nib.save(slab_img, slabdir + '/' + file[:-7] + '_slab.nii.gz')
+
+
+def gather(dir_arg, groupdir_arg):
+    imgs = getfiles(dir_arg)
+    if not os.path.exists(groupdir_arg):
+        os.makedirs(groupdir_arg)
+    for path in imgs:
+        dir, file = os.path.split(path)
+        fromfile = path
+        tofile = groupdir_arg + '/' +file
+        sts = subprocess.Popen( 'cp ' + fromfile + ' ' + tofile , shell=True).wait()
+
+def resize_xy_nifti(path_arg, size):
+    desired_size = size
+    img = nib.load(path_arg)
+    data = img.get_data()
+    print(data.shape)
+    for z in range(data.shape[2]):
+        im = Image.fromarray(data[:,:,z])
+        old_size = im.size
+        ratio = float(desired_size)/max(old_size)
+        new_size = tuple([int(x*ratio) for x in old_size])
+        im = im.resize(new_size, Image.BICUBIC)
+        new_im = Image.new("I", (desired_size, desired_size))
+        new_im.paste(im, ((desired_size-new_size[0])//2, (desired_size-new_size[1])//2))
+        np_new = np.array(new_im)
+        if z== 0:
+            stack = np_new
+            stack = np.expand_dims(stack, 0)
+        else:
+            stack = np.append(stack, [np_new], axis=0)
+    stack = np.flip(stack, 1)
+    stack = np.swapaxes(stack, 1, 2)
+    stack = np.swapaxes(stack, 0, 2)
+    #new_im.show()
+    return(stack)
+
+
+def resize_xy_nifti_dir(path_arg, size):
+    desired_size = size
+    slabdir = path_arg
+
+    #if not os.path.exists(resizedir):
+        # os.makedirs(resizedir)
+    imgs = getfiles(slabdir)
+    for path in imgs:
+        dir, file = os.path.split(path)
+
+        img = nib.load(path)
+        data = img.get_data()
+        if data.shape[0] < 100:
+            data = np.swapaxes(data, 0, 2)
+        elif data.shape[1] < 100:
+            data = np.swapaxes(data, 1, 2)
+
+        print( 'in' + str(data.shape))
+        for z in range(data.shape[2]):
+            im = Image.fromarray(data[:, :, z])
+            if im.mode != 'I':
+                im = im.convert('I')
+            old_size = im.size
+            ratio = float(desired_size) / max(old_size)
+            new_size = tuple([int(x * ratio) for x in old_size])
+            im = im.resize(new_size, Image.BICUBIC)
+            new_im = Image.new("I", (desired_size, desired_size))
+            new_im.paste(im, ((desired_size - new_size[0]) // 2, (desired_size - new_size[1]) // 2))
+            np_new = np.array(new_im)
+            if z == 0:
+                stack = np_new
+                stack = np.expand_dims(stack, 0)
+            else:
+                stack = np.append(stack, [np_new], axis=0)
+
+        stack = np.flip(stack, 1)
+        stack = np.swapaxes(stack, 1, 2)
+        stack = np.swapaxes(stack, 0, 2)
+        print('out' + str(stack.shape))
+        stack_img = nib.Nifti1Pair(stack, np.eye(4))
+        nib.save(stack_img, dir + '/' +file[:-7] + '_resize_128.nii.gz')
+
+def build_train(path_arg):
+    resizedir = path_arg
+    imgs = getfiles(resizedir)
+    i=0
+    for path in imgs:
+        dir, file = os.path.split(path)
+        age = int(file[3:5])
+        img = nib.load(path)
+        data = img.get_data()
+
+
+        for z in range(data.shape[2]):
+            im = data[:, :, z]
+            im = np.expand_dims(im, 2)
+            age_line = np.expand_dims(age, 0)
+
+            if i == 0:
+                stack_x = im
+                i += 1
+                stack_y = (age_line)
+            else:
+                #im = np.expand_dims(im, 2)
+                stack_x = np.concatenate((stack_x, im), axis=2)
+                stack_y = np.concatenate((stack_y, age_line), axis=0)
+
+                i += 1
+        print(stack_x.shape)
+    np.save(path_arg + '/X_train.npy', stack_x)
+    np.save(path_arg + '/Y_train.npy', stack_y)
+
+
+# maskall(stddir)
+##crop_with_mask(stddir)
+##offsets(cropped_stddir)
+# #resample(gatherdir )
+#maskall(resampledir)
+#motion_sim(resampledir)
+
+#L= itertools.product(['x','y','z'], [-15,15])
+# for i in L
+# rotate(stddir, theta =4, axis= 'z')
+
+
+#for d in glob.glob(stddir + '/*Rotated*/'):
+#    maskall(d)
+#    crop_with_mask(d)
+#    slab(d)
+
+#for d in glob.glob(stddir + '/*Rotated*/Slab/'):
+#    gather(d, gatherdir)
+
+# resize_xy_nifti_dir(resampledir, 128)
+
+# build_train(resizedir)
+
+
+fetaldir = '/media/jmaffie/DED6CDEFD6CDC7CB/Users/Jon Maffie/Documents/fetal'
+
+for path in glob.glob(fetaldir + '/*/*/*/*label*.nii.gz'):
+    dir_global, file_global = os.path.split(path)
+    print(dir_global)
+    img_files = getfiles(dir_global)
+    print(len(img_files))
+    if len(img_files) != 2:
+        continue
+
+    #data_global = file_global.get_data()
+    # imgplot = plt.imshow(x_test[50, :, :, 0])
+    #plt.show()
+    else:
+        resize_xy_nifti_dir(dir_global, 128)
